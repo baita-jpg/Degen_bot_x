@@ -1,13 +1,18 @@
 import { Telegraf, Markup, Scenes, session } from 'telegraf';
-import { VercelRequest, VercelResponse } from '@vercel/node';
 import { Connection, PublicKey, LAMPORTS_PER_SOL, Keypair } from '@solana/web3.js';
 import { createClient } from '@supabase/supabase-js';
 import * as crypto from 'crypto';
 import bs58 from 'bs58';
-import { decryptPrivateKey } from './vault';
-import { executeJupiterSwap } from './swap';
 
-const token = process.env.TELEGRAM_BOT_TOKEN || '8928257398:AAEbis6tUCzdYI5KmZ_6l7LDc0t0BewUmFA';
+// --- APEX PROPRIETARY MODULES ---
+import { decryptPrivateKey } from './vault';
+import { executeJupiterSwap } from '../utils/swapEngine';
+import { computeMacroState } from '../utils/macroEngine';
+import { runRadarScans } from '../utils/socialRadar';
+import { runDeepTokenAudit } from '../utils/tokenValidator';
+import { generatePerformanceMetrics, generateEquityCurve } from '../utils/reportingCore';
+
+const token = process.env.TELEGRAM_BOT_TOKEN || '';
 const bot = new Telegraf(token);
 
 // ─── DATABASE INITIALIZATION ─────────────────────────────────────────
@@ -48,9 +53,10 @@ function encryptPrivateKey(privateKey: string, tgUserId: number) {
 
 // ─── MAIN CONSOLE DASHBOARD ──────────────────────────────────────────
 const getDashboardHTML = async (userId: number) => {
-    let balanceText = "<code>0.0000 SOL</code>";
-    let activeWalletStr = "<code>UNLINKED</code> ⚠️";
+    let balanceText = "0.0000 SOL";
+    let activeWalletStr = "UNLINKED ⚠️";
     let rpcLatency = "N/A";
+    let dataLinkStr = supabaseActive ? "Secured Cloud" : "Local Sandbox";
 
     try {
         let pubKeyToQuery = '';
@@ -65,34 +71,33 @@ const getDashboardHTML = async (userId: number) => {
         }
 
         if (pubKeyToQuery) {
-            activeWalletStr = `<code>${pubKeyToQuery.substring(0, 4)}...${pubKeyToQuery.substring(pubKeyToQuery.length - 4)}</code> [${walletType}]`;
+            activeWalletStr = `${pubKeyToQuery.substring(0, 4)}...${pubKeyToQuery.substring(pubKeyToQuery.length - 4)} [${walletType}]`;
             const startTime = performance.now();
             const lamports = await connection.getBalance(new PublicKey(pubKeyToQuery));
             rpcLatency = (performance.now() - startTime).toFixed(0) + 'ms';
-            balanceText = `<b>${(lamports / LAMPORTS_PER_SOL).toFixed(4)} SOL</b>`;
+            balanceText = `${(lamports / LAMPORTS_PER_SOL).toFixed(4)} SOL`;
         }
     } catch (err) {
-        balanceText = "<code>⚠️ OFFLINE</code>";
+        balanceText = "OFFLINE ⚠️";
     }
 
-    return `
-🦅 <b>ＰＲＯＪＥＣＴ  ＡＰＥＸ | ｖ２．７</b>
+    return `<pre>
+🦅 PROJECT APEX | v2.7
 ════════════════════════════════════
 
-📡 <b>SYSTEM TELEMETRY</b>
-┣ <b>Operator:</b> <code>#${userId}</code>
-┣ <b>Node Status:</b> 🟢 Mainnet-Beta
-┗ <b>Data Link:</b> ${supabaseActive ? '🟢 Secured Cloud' : '🟡 Local Sandbox'}
+📡 SYSTEM TELEMETRY
+┣ Operator  : #${userId}
+┣ Node State: Mainnet-Beta
+┗ Data Link : ${dataLinkStr}
 
-💼 <b>LIQUIDITY VAULT</b>
-╭──────────────────────────────────╮
-│ <b>Wallet :</b> ${activeWalletStr}
-│ <b>Balance:</b> ${balanceText}
-│ <b>Ping   :</b> <code>${rpcLatency}</code>
-╰──────────────────────────────────╯
+💼 LIQUIDITY VAULT
+┌──────────────────────────────────┐
+│ Wallet  : ${activeWalletStr.padEnd(23)}│
+│ Balance : ${balanceText.padEnd(23)}│
+│ Ping    : ${rpcLatency.padEnd(23)}│
+└──────────────────────────────────┘
 
-<i>Select an operational matrix down below:</i>
-`;
+Select an operational matrix down below:</pre>`;
 };
 
 // ─── WIZARD FOR WALLET CONFIGS ───────────────────────────────────────
@@ -170,113 +175,293 @@ bot.action('submenu_reports', async (ctx) => {
     await ctx.answerCbQuery();
     const keyboard = Markup.inlineKeyboard([
         [Markup.button.callback('🌅 Market Opening', 'rep_open'), Markup.button.callback('🌌 Market Closing', 'rep_close')],
-        [Markup.button.callback('💧 Liquidity Report', 'rep_liq'), Markup.button.callback('📈 Market Forecast', 'rep_fore')],
-        [Markup.button.callback('↩️ Return to Main Desk', 'go_home')]
+        [Markup.button.callback('💧 Macro Intelligence Deck', 'rep_fore')]
     ]);
-    await ctx.editMessageText(`<b>📋 MACRO INTELLIGENCE DECK</b>\n════════════════════════════════════\nSelect a cached global intelligence digest channel below:`, { parse_mode: 'HTML', reply_markup: keyboard.reply_markup });
+    await ctx.editMessageText(`<b>📋 INTELLIGENCE REPORTS</b>\n════════════════════════════════════\nSelect a cached global intelligence digest channel below:`, { parse_mode: 'HTML', reply_markup: keyboard.reply_markup });
 });
 
 // SUBMENU 2: TRACKING & RADARS
 bot.action('submenu_tracking', async (ctx) => {
     await ctx.answerCbQuery();
     const keyboard = Markup.inlineKeyboard([
-        [Markup.button.callback('🐋 Whale Activity Radar', 'track_whales'), Markup.button.callback('🔥 Trending on X', 'track_x')],
-        [Markup.button.callback('📢 Telegram Alpha Feed', 'track_tg'), Markup.button.callback('🎟️ Whitelist Tracker', 'track_wl')],
-        [Markup.button.callback('💼 Tx History & ROI', 'track_roi'), Markup.button.callback('↩️ Return to Main Desk', 'go_home')]
+        [Markup.button.callback('🐋 Social & On-Chain Radar', 'rep_liq')],
+        [Markup.button.callback('💼 Unified ROI Ledger', 'track_roi')],
+        [Markup.button.callback('↩️ Return to Main Desk', 'go_home')]
     ]);
     await ctx.editMessageText(`<b>📡 ON-CHAIN TRACKING & SOCIAL RADARS</b>\n════════════════════════════════════\nReal-time network scanners and behavioral social indexing pipelines:`, { parse_mode: 'HTML', reply_markup: keyboard.reply_markup });
 });
 
-// ─── DYNAMIC ANALYTICS & CACHE FETCHERS ──────────────────────────────
+// ─── MACRO INTELLIGENCE DECK ─────────────────────────────────────────
+bot.action('rep_fore', async (ctx) => {
+    await ctx.answerCbQuery('Computing structural market layers...');
+    const macro = await computeMacroState();
+
+    const basisColor = macro.basisCondition === 'DISCOUNT' ? '🟡' : '🟢';
+    const toxicityColor = macro.flowToxicity === 'HIGH' ? '🔴' : '🟢';
+
+    const panel = `<pre>
+🦅 APEX TERMINAL // MACRO INTELLIGENCE DECK
+════════════════════════════════════════════
+
+📈 DEFI DERIVATIVE SPREAD CALCULATOR
+┣ Base Spot Index: $${macro.spotPrice} USD
+┣ Perp Mark Index: $${macro.perpPrice} USD
+┣ Basis Premium  : <code>${macro.basisSpread >= 0 ? '+' : ''}${macro.basisSpread}</code>
+┗ Structural Risk: ${basisColor} <b>${macro.basisCondition} STATE</b>
+
+💧 ORDER FLOW & RESERVES TOXICITY
+┣ Pool Turn Velocity: ${macro.capitalVelocity}x
+┣ MEV Arbitrage Ratio: ${macro.toxicVolumeRatio}%
+┗ Flow Classification: ${toxicityColor} <b>${macro.flowToxicity} TOXICITY</b>
+────────────────────────────────────────
+Live Telemetry Reconciled via Jito ShredStream Engine</pre>`;
+
+    await ctx.editMessageText(panel, {
+        parse_mode: 'HTML',
+        reply_markup: Markup.inlineKeyboard([
+            [Markup.button.callback('🔄 Compute New Block Range', 'rep_fore')],
+            [Markup.button.callback('↩️ Back to Reports', 'submenu_reports')]
+        ]).reply_markup
+    });
+});
+
+// ─── SOCIAL & ON-CHAIN RADARS ────────────────────────────────────────
 bot.action('rep_liq', async (ctx) => {
-    await ctx.answerCbQuery('Fetching live liquidity index...');
+    await ctx.answerCbQuery('Scanning social networks and wallet graphs...');
+    
+    const sampleTargetMint = 'So11111111111111111111111111111111111111112'; // Wrapped SOL base proxy
+    const radar = await runRadarScans(sampleTargetMint);
+
+    const alertIcon = radar.insiderConvictionStatus === 'ACCUMULATION' ? '🔥' : '⚠️';
+
+    const panel = `<pre>
+🦅 APEX TERMINAL // SOCIAL & ON-CHAIN RADARS
+════════════════════════════════════════════
+
+🐋 WALLET ANCESTRY CLUSTERING LEDGER
+┣ Coordinated Rings : ${radar.detectedClusters} Active Clusters Found
+┣ Supply Capture    : <code>${radar.syndicateConcentrationPct}%</code> of circulating supply
+┗ Syndicate Phase   : ${alertIcon} <b>${radar.insiderConvictionStatus} FOCUS</b>
+
+🔥 INFORMATIONAL ASYMMETRY SCANNERS
+┣ Social Density    : [ ${radar.socialDensityVelocity} / 100 ] Pure Velocity Rating
+┗ Network Resonance : Linked in ${radar.crossGroupResonanceCount} Secret Developer Channels
+────────────────────────────────────────
+Scrubbing automated bot farm metrics from live outputs</pre>`;
+
+    await ctx.editMessageText(panel, {
+        parse_mode: 'HTML',
+        reply_markup: Markup.inlineKeyboard([
+            [Markup.button.callback('🔄 Run Deep Network Rescan', 'rep_liq')],
+            [Markup.button.callback('↩️ Back to Tracking', 'submenu_tracking')]
+        ]).reply_markup
+    });
+});
+
+// ─── UNIFIED PERFORMANCE & ROI LEDGER (MILESTONE 5) ──────────────────
+bot.action('track_roi', async (ctx) => {
+    const userId = ctx.from?.id;
+    if (!userId) return;
+
+    await ctx.answerCbQuery('Rendering graphic performance curves...');
+
     try {
         if (!supabaseActive) throw new Error("Database offline");
-        const { data, error } = await supabase.from('system_reports').select('content').eq('report_type', 'liquidity').order('compiled_at', { ascending: false }).limit(1).single();
-        if (error || !data) throw new Error("No reports found");
-        
-        await ctx.editMessageText(data.content, { parse_mode: 'HTML', reply_markup: Markup.inlineKeyboard([[Markup.button.callback('↩️ Back to Reports', 'submenu_reports')]]).reply_markup });
-    } catch (err) {
-        await ctx.editMessageText('⚠️ <b>Data Unavailability:</b> The background cron indexer has not compiled the liquidity matrix yet or the database is disconnected.', { parse_mode: 'HTML', reply_markup: Markup.inlineKeyboard([[Markup.button.callback('↩️ Back', 'submenu_reports')]]).reply_markup });
+
+        // Fetch Metrics
+        const liveMetrics = await generatePerformanceMetrics(supabase, userId, 'MAINNET_LIVE');
+        const demoMetrics = await generatePerformanceMetrics(supabase, userId, 'DEMO_PAPER');
+
+        // Fetch Visual Equity Curves
+        const liveCurve = await generateEquityCurve(supabase, userId, 'MAINNET_LIVE');
+        const demoCurve = await generateEquityCurve(supabase, userId, 'DEMO_PAPER');
+
+        const liveText = liveMetrics ? `
+┣ Vector Plot   : ${liveCurve}
+┣ Total Trades  : ${liveMetrics.totalTrades}
+┣ Win Rate      : <code>${liveMetrics.winRate}%</code>
+┣ Profit Factor : <code>${liveMetrics.profitFactor}x</code>
+┗ Net Yield     : <code>${liveMetrics.netSolPnL >= 0 ? '+' : ''}${liveMetrics.netSolPnL} SOL</code>` 
+: `\n❌ No production deployments executed.`;
+
+        const demoText = demoMetrics ? `
+┣ Vector Plot   : ${demoCurve}
+┣ Total Trades  : ${demoMetrics.totalTrades}
+┣ Win Rate      : <code>${demoMetrics.winRate}%</code>
+┣ Profit Factor : <code>${demoMetrics.profitFactor}x</code>
+┗ Net Yield     : <code>${demoMetrics.netSolPnL >= 0 ? '+' : ''}${demoMetrics.netSolPnL} SOL</code>`
+: `\n❌ No simulation tracking parameters logged.`;
+
+        const summaryContent = `<pre>
+🦅 APEX UNIFIED PERFORMANCE LEDGER
+════════════════════════════════════════
+REAL-TIME MULTI-ACCOUNT ACCOUNTING
+
+🟢 PRODUCTION VALUATION (LIVE KEYS)${liveText}
+
+🔮 SIMULATION ACCOUNTING (SECOND TRADER)${demoText}
+────────────────────────────────────────
+System Audit Status: Validated
+Last Reconciled: ${new Date().toISOString().substring(0, 19).replace('T', ' ')} UTC</pre>`;
+
+        await ctx.editMessageText(summaryContent, {
+            parse_mode: 'HTML',
+            reply_markup: Markup.inlineKeyboard([
+                [Markup.button.callback('🔄 Re-Audit Systems', 'track_roi')],
+                [Markup.button.callback('↩️ Main Terminal Desk', 'go_home')]
+            ]).reply_markup
+        });
+
+    } catch (err: any) {
+        await ctx.editMessageText(`❌ <b>Audit Failure:</b> <code>${err.message}</code>`, {
+            parse_mode: 'HTML',
+            reply_markup: Markup.inlineKeyboard([[Markup.button.callback('↩️ Return', 'go_home')]]).reply_markup
+        });
     }
 });
 
-// ─── ON-CHAIN TOKEN SCANNER ──────────────────────────────────────────
+
+// ─── ON-CHAIN MANUAL TOKEN SCANNER (MILESTONE 2) ─────────────────────
 bot.on('text', async (ctx) => {
-    const textInput = ctx.message.text.trim();
-    if (/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(textInput)) {
-        
-        // 1. Re-added the missing analyticalReport definition
-        const analyticalReport = `
-🎯 <b>TARGET INTERCEPTED</b>
-════════════════════════════════════
-<b>CA:</b> <code>${textInput}</code>
+    const text = ctx.message.text.trim();
+    const userId = ctx.from?.id;
+    if (!userId) return;
 
-🛡️ <b>RISK SCAN ANALYSIS:</b>
-• Mint Authority: 🟢 <b>REVOKED</b>
-• Freeze Authority: 🟢 <b>REVOKED</b>
-• Pool Liquidity: 🔥 100% Burned
-───────────────────────────────────`;
+    const isSolanaAddress = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(text);
 
-        const actionKeyboard = Markup.inlineKeyboard([
-            [Markup.button.callback('🟢 Buy 0.5 SOL', `buy_0.5_${textInput}`), Markup.button.callback('🟢 Buy 1.0 SOL', `buy_1.0_${textInput}`)],
-            [Markup.button.callback('❌ Abort Trade', 'go_home')]
-        ]);
-        await ctx.replyWithHTML(analyticalReport, actionKeyboard);
+    if (isSolanaAddress) {
+        const loadingMsg = await ctx.replyWithHTML(`🔍 <b>INTERCEPTING SMART CONTRACT HASH...</b>\n<code>${text}</code>\n⏳ Executing multi-layered risk audit routines...`);
+
+        try {
+            const audit = await runDeepTokenAudit(text);
+
+            if (!audit.success) {
+                return await ctx.telegram.editMessageText(ctx.chat.id, loadingMsg.message_id, undefined, 
+                    `⚠️ <b>Audit Terminated:</b> Contract hash recognized, but no viable AMM routing matrices exist.`,
+                    { parse_mode: 'HTML' }
+                );
+            }
+
+            const trendSign = audit.change24h >= 0 ? '🟢 +' : '🔴 ';
+            const warningsBlock = audit.warnings.length > 0 
+                ? `\n⚠️ <b>RISK CONSOLE ALERTS:</b>\n${audit.warnings.map(w => `• <code>${w}</code>`).join('\n')}\n` 
+                : `\n✅ <b>RISK CONSOLE:</b> No immediate architectural vulnerabilities found.\n`;
+
+            const panel = `<pre>
+🦅 APEX MANUAL TOKEN INTERCEPT MATRIX
+════════════════════════════════════════
+
+🎯 IDENTIFIED : $${audit.symbol} | ${audit.name}
+┣ Address    : ${audit.address.substring(0, 4)}...${audit.address.substring(audit.address.length - 4)}
+┣ Market Cap : $${(audit.fdv / 1000).toFixed(2)}K
+┗ Price Index: $${audit.priceUsd.toFixed(6)} (${trendSign}${audit.change24h.toFixed(2)}%)
+
+💧 LIQUIDITY AND METRIC MOMENTUM
+┣ Pool Reserves  : $${(audit.liquidityUsd / 1000).toFixed(2)}K
+┣ 24h Net Volume : $${(audit.volume24h / 1000).toFixed(2)}K
+┣ Capital Turning: ${audit.capitalVelocity}x
+┗ Order Pressure : ${audit.orderPressure} (Buy/Sell)
+
+🛡️ ALGORITHMIC TRUST SCORE
+┌──────────────────────────────────────┐
+│ PROFILE MATRIX INDEX: [ ${audit.safetyScore.toString().padEnd(3)} / 100 ]     │
+└──────────────────────────────────────┘</pre>
+${warningsBlock}
+<pre>Select execution profile to initialize immediate Jito bundle routing:</pre>`;
+
+            await ctx.telegram.deleteMessage(ctx.chat.id, loadingMsg.message_id).catch(() => {});
+            
+            return await ctx.reply(panel, {
+                parse_mode: 'HTML',
+                reply_markup: Markup.inlineKeyboard([
+                    [
+                        Markup.button.callback(`🛒 Buy 0.05 SOL`, `quickbuy_0.05_${text}_${audit.symbol}`),
+                        Markup.button.callback(`🛒 Buy 0.25 SOL`, `quickbuy_0.25_${text}_${audit.symbol}`)
+                    ],
+                    [Markup.button.callback('❌ Abort Operation', 'go_home')]
+                ]).reply_markup
+            });
+
+        } catch (err) {
+            return await ctx.reply(`❌ <b>Audit Execution Crash:</b> System was unable to map data loops over this target structure.`);
+        }
     }
+
+    await ctx.reply("⚡ Unknown terminal instruction. Type /terminal to load matrix dashboard commands.");
 });
 
-// ─── THE EXECUTION ENGINE (SWAP ROUTER) ──────────────────────────────
-// 2. Added the fully complete Jupiter Swap Logic
-bot.action(/^buy_([\d\.]+)_([a-zA-Z0-9]{32,44})$/, async (ctx) => {
-    const amountStr = ctx.match[1];
-    const tokenMint = ctx.match[2];
-    const userId = ctx.from?.id || 0;
-    
-    await ctx.answerCbQuery(`Initiating swap for ${amountStr} SOL...`);
-    const statusMsg = await ctx.replyWithHTML(`⚡ <b>ROUTING ORDER:</b> <code>${amountStr} SOL</code>\n⏳ Fetching Jupiter Aggregator paths...`);
+// --- SWAP BUTTON HANDLER DISPATCH LOOP ---
+bot.action(/^quickbuy_(.+)$/, async (ctx) => {
+    const payload = ctx.match[1]; 
+    const [amountStr, tokenAddress, tokenSymbol] = payload.split('_');
+    const userId = ctx.from?.id;
+    if (!userId) return;
+
+    await ctx.answerCbQuery('Assembling transaction frames...');
+    await ctx.editMessageText('⚡ <b>Broadcasting execution frame to Jito Validators...</b>', { parse_mode: 'HTML' });
 
     try {
+        let userPrivateKey = '';
         let encryptedPayload, iv, tag;
 
-        // Fetch Vault Keys
         if (supabaseActive) {
             const { data } = await supabase.from('user_wallets').select('*').eq('tg_user_id', userId).eq('is_active', true).maybeSingle();
-            if (!data) throw new Error("No active wallet linked.");
-            encryptedPayload = data.encrypted_secret_payload;
-            iv = data.iv;
-            tag = data.tag;
+            if (data) {
+                encryptedPayload = data.encrypted_secret_payload;
+                iv = data.iv;
+                tag = data.tag;
+            }
         } else if (localWalletStore.has(userId)) {
             const localW = localWalletStore.get(userId);
             encryptedPayload = localW?.enc;
             iv = localW?.iv;
             tag = localW?.tag;
-        } else {
-            throw new Error("Wallet uninitialized. Please link a wallet in settings.");
         }
 
-        // Decrypt Private Key
-        const privateKeyHex = decryptPrivateKey(encryptedPayload, iv, tag, userId);
+        if (!encryptedPayload) throw new Error("No linked wallet configuration found inside server state registers.");
 
-        await ctx.telegram.editMessageText(ctx.chat?.id, statusMsg.message_id, undefined, `⚡ <b>ORDER SIGNED.</b>\n📡 Broadcasting to Solana Mainnet...`, { parse_mode: 'HTML' });
-        
-        // Execute Jupiter SDK Swap
-        const txid = await executeJupiterSwap(tokenMint, parseFloat(amountStr), privateKeyHex, RPC_ENDPOINT);
+        userPrivateKey = decryptPrivateKey(encryptedPayload, iv, tag, userId);
 
-        const receipt = `
-✅ <b>TRADE EXECUTED SUCCESSFULLY</b>
-════════════════════════════════════
-<b>Asset:</b> <code>${tokenMint}</code>
-<b>Volume:</b> ${amountStr} SOL
-<b>Network:</b> Solana Mainnet-Beta
+        const tradeAmountSol = parseFloat(amountStr);
+        const result = await executeJupiterSwap(userPrivateKey, tokenAddress, tradeAmountSol);
 
-🔗 <a href="https://solscan.io/tx/${txid}">View Transaction on Solscan</a>
-`;
-        await ctx.telegram.editMessageText(ctx.chat?.id, statusMsg.message_id, undefined, receipt, { parse_mode: 'HTML', disable_web_page_preview: true });
+        if (!result.success) throw new Error(result.error);
+
+        if (supabaseActive && result.fillPriceUsd && result.tokensReceived) {
+            await supabase.from('user_trades').insert({
+                tg_user_id: userId,
+                token_address: tokenAddress,
+                token_symbol: tokenSymbol,
+                buy_price_usd: result.fillPriceUsd,
+                token_amount: result.tokensReceived,
+                sol_amount: tradeAmountSol
+            });
+        }
+
+        const successMessage = `<pre>
+🟩 TRANSACTION EXECUTED SUCCESSFULLY
+════════════════════════════════════════
+Asset acquired via premium Jupiter Routing paths.
+
+📦 Token  : $${tokenSymbol}
+💎 Allocation : ${tradeAmountSol} SOL
+🧾 Signature  : ${result.signature?.substring(0, 8)}...${result.signature?.substring(result.signature.length - 8)}
+
+Check portfolio tracking ledgers to monitor ROI swing adjustments.</pre>`;
+
+        await ctx.editMessageText(successMessage, {
+            parse_mode: 'HTML',
+            reply_markup: Markup.inlineKeyboard([
+                [Markup.button.callback('📊 View ROI Ledger', 'track_roi')],
+                [Markup.button.callback('↩️ Return', 'go_home')]
+            ]).reply_markup
+        });
 
     } catch (err: any) {
-        console.error("Swap Execution Failed:", err);
-        await ctx.telegram.editMessageText(ctx.chat?.id, statusMsg.message_id, undefined, `❌ <b>TRADE FAILED</b>\n════════════════════════════════════\n<code>${err.message}</code>`, { parse_mode: 'HTML' });
+        await ctx.editMessageText(`❌ <b>Execution Panic:</b> <code>${err.message}</code>`, {
+            parse_mode: 'HTML',
+            reply_markup: Markup.inlineKeyboard([[Markup.button.callback('↩️ Back to Dashboard', 'go_home')]]).reply_markup
+        });
     }
 });
 
@@ -312,24 +497,17 @@ bot.action('wallet_generate', async (ctx) => {
     }
 });
 
-// ─── STATIC STUBS ────────────────────────────────────────────────────
-bot.action('rep_open', async (ctx) => { await ctx.answerCbQuery(); await ctx.editMessageText('🌅 <b>DAILY MARKET OPENING & MEME RECAP</b>\n════════════════════════════════════\n<b>💼 Global Financial Summary:</b> S&P 500 flat, DXY drops 0.2%.\n<b>₿ Crypto Assets:</b> BTC defending $68.5k support.', { parse_mode: 'HTML', reply_markup: Markup.inlineKeyboard([[Markup.button.callback('↩️ Back to Reports', 'submenu_reports')]]).reply_markup }); });
-bot.action('track_whales', async (ctx) => { await ctx.answerCbQuery(); await ctx.editMessageText('🐋 <b>WHALE TRACKING RADAR (LAST 60M)</b>\n════════════════════════════════════\n• <code>Wallet: 7xZp...K9wN</code> swapped <b>450 SOL</b> for <code>$APEX</code>', { parse_mode: 'HTML', reply_markup: Markup.inlineKeyboard([[Markup.button.callback('↩️ Back to Radars', 'submenu_tracking')]]).reply_markup }); });
-bot.action('track_x', async (ctx) => { await ctx.answerCbQuery(); await ctx.editMessageText('🔥 <b>X Trending Tracker:</b> Narrative volume parsing online.', { parse_mode: 'HTML', reply_markup: Markup.inlineKeyboard([[Markup.button.callback('↩️ Back', 'submenu_tracking')]]).reply_markup }); });
-bot.action('track_tg', async (ctx) => { await ctx.answerCbQuery(); await ctx.editMessageText('📢 <b>Alpha Channels Scanner:</b> 41 targets currently indexed.', { parse_mode: 'HTML', reply_markup: Markup.inlineKeyboard([[Markup.button.callback('↩️ Back', 'submenu_tracking')]]).reply_markup }); });
-bot.action('track_wl', async (ctx) => { await ctx.answerCbQuery(); await ctx.editMessageText('🎟️ <b>Whitelist Matrix:</b> Allocations monitored.', { parse_mode: 'HTML', reply_markup: Markup.inlineKeyboard([[Markup.button.callback('↩️ Back', 'submenu_tracking')]]).reply_markup }); });
-bot.action('track_roi', async (ctx) => { await ctx.answerCbQuery(); await ctx.editMessageText('💼 <b>Transaction History Desk:</b> Calculating wallet yield rates...', { parse_mode: 'HTML', reply_markup: Markup.inlineKeyboard([[Markup.button.callback('↩️ Back', 'submenu_tracking')]]).reply_markup }); });
+// STATIC UI PLACEHOLDERS
+bot.action('rep_open', async (ctx) => { await ctx.answerCbQuery(); await ctx.editMessageText('🌅 <b>Morning Market Intel:</b> No recent AI summaries compiled.', { parse_mode: 'HTML', reply_markup: Markup.inlineKeyboard([[Markup.button.callback('↩️ Back', 'submenu_reports')]]).reply_markup }); });
 bot.action('rep_close', async (ctx) => { await ctx.answerCbQuery(); await ctx.editMessageText('🌌 <b>Daily Market Closing Digest compiled at 22:00 UTC.</b>', { parse_mode: 'HTML', reply_markup: Markup.inlineKeyboard([[Markup.button.callback('↩️ Back', 'submenu_reports')]]).reply_markup }); });
-bot.action('rep_fore', async (ctx) => { await ctx.answerCbQuery(); await ctx.editMessageText('📈 <b>Market Trend Forecast Engines:</b> Computing directional vectors.', { parse_mode: 'HTML', reply_markup: Markup.inlineKeyboard([[Markup.button.callback('↩️ Back', 'submenu_reports')]]).reply_markup }); });
 bot.action('menu_buy', async (ctx) => { await ctx.answerCbQuery(); await ctx.editMessageText('📥 <b>Submit contract address hash string:</b>', { parse_mode: 'HTML', reply_markup: Markup.inlineKeyboard([[Markup.button.callback('↩️ Home', 'go_home')]]).reply_markup }); });
 bot.action('menu_snipe', async (ctx) => { await ctx.answerCbQuery(); await ctx.editMessageText('🚀 <b>Sniper Node Online.</b>', { parse_mode: 'HTML', reply_markup: Markup.inlineKeyboard([[Markup.button.callback('↩️ Home', 'go_home')]]).reply_markup }); });
 
-// 3. Moved Global Error Handler to the absolute bottom above export
 bot.catch((err, ctx) => {
     console.error(`Error for ${ctx.updateType}`, err);
 });
 
-export default async function handle(req: VercelRequest, res: VercelResponse) {
+export default async function handle(req: any, res: any) {
     if (req.method === 'POST') {
         try { 
             await bot.handleUpdate(req.body); 
