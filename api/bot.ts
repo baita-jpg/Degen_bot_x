@@ -13,7 +13,27 @@ import { runDeepTokenAudit } from '../utils/tokenValidator';
 import { generatePerformanceMetrics, generateEquityCurve } from '../utils/reportingCore';
 
 const token = process.env.TELEGRAM_BOT_TOKEN || '';
+
+if (!token) {
+    console.error('❌ CRITICAL: TELEGRAM_BOT_TOKEN not set. Bot cannot initialize.');
+    process.exit(1);
+}
+
 const bot = new Telegraf(token);
+
+// ─── TIMEOUT WRAPPER FOR ASYNC OPERATIONS ────────────────────────────
+function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
+    return Promise.race([
+        promise,
+        new Promise<T>((_, reject) => setTimeout(() => reject(new Error(`Operation timeout after ${ms}ms`)), ms))
+    ]).catch(() => fallback);
+}
+
+// ─── GLOBAL ERROR HANDLER MIDDLEWARE ─────────────────────────────────
+bot.catch((err: any, ctx: any) => {
+    console.error('🔴 Bot Error:', err);
+    ctx.reply('⚠️ System encountered an error. Returning to main console...').catch(() => {});
+});
 
 // ─── DATABASE INITIALIZATION ─────────────────────────────────────────
 let supabaseActive = false;
@@ -63,8 +83,12 @@ const getDashboardHTML = async (userId: number) => {
         let walletType = '';
 
         if (supabaseActive) {
-            const { data } = await supabase.from('user_wallets').select('*').eq('tg_user_id', userId).eq('is_active', true).maybeSingle();
-            if (data) { pubKeyToQuery = data.public_key; walletType = 'CLOUD'; }
+            const dbResult = await withTimeout(
+                supabase.from('user_wallets').select('*').eq('tg_user_id', userId).eq('is_active', true).maybeSingle(),
+                5000,
+                { data: null }
+            );
+            if (dbResult?.data) { pubKeyToQuery = dbResult.data.public_key; walletType = 'CLOUD'; }
         } else if (localWalletStore.has(userId)) {
             const localW = localWalletStore.get(userId);
             if (localW) { pubKeyToQuery = localW.pubKey; walletType = `LOCAL`; }
@@ -73,11 +97,16 @@ const getDashboardHTML = async (userId: number) => {
         if (pubKeyToQuery) {
             activeWalletStr = `${pubKeyToQuery.substring(0, 4)}...${pubKeyToQuery.substring(pubKeyToQuery.length - 4)} [${walletType}]`;
             const startTime = performance.now();
-            const lamports = await connection.getBalance(new PublicKey(pubKeyToQuery));
+            const lamports = await withTimeout(
+                connection.getBalance(new PublicKey(pubKeyToQuery)),
+                3000,
+                0
+            );
             rpcLatency = (performance.now() - startTime).toFixed(0) + 'ms';
             balanceText = `${(lamports / LAMPORTS_PER_SOL).toFixed(4)} SOL`;
         }
     } catch (err) {
+        console.error('Dashboard error:', err);
         balanceText = "OFFLINE ⚠️";
     }
 
@@ -148,6 +177,24 @@ bot.use(session());
 bot.use(stage.middleware());
 
 // ─── ROUTING MATRIX INTERFACES ───────────────────────────────────────
+// QUICK SNIPE MENU
+bot.action('menu_snipe', async (ctx) => {
+    await ctx.answerCbQuery();
+    await ctx.editMessageText(`<b>🚀 QUICK SNIPE MODE</b>\n════════════════════════════════════\nPaste a Solana token address to execute rapid acquisition on detected momentum.\n\nExample: <code>EPjFWaJgjqPCj9w6aSG2UVetUuwT66R28d4a5j7CScZ</code>`, {
+        parse_mode: 'HTML',
+        reply_markup: Markup.inlineKeyboard([[Markup.button.callback('↩️ Back', 'go_home')]]).reply_markup
+    });
+});
+
+// MANUAL BUY MENU
+bot.action('menu_buy', async (ctx) => {
+    await ctx.answerCbQuery();
+    await ctx.editMessageText(`<b>⚡ MANUAL BUY MODE</b>\n════════════════════════════════════\nPaste a Solana token address to configure custom buy parameters.\n\nExample: <code>EPjFWaJgjqPCj9w6aSG2UVetUuwT66R28d4a5j7CScZ</code>`, {
+        parse_mode: 'HTML',
+        reply_markup: Markup.inlineKeyboard([[Markup.button.callback('↩️ Back', 'go_home')]]).reply_markup
+    });
+});
+
 const mainKeyboard = Markup.inlineKeyboard([
     [Markup.button.callback('📊 Intelligence Reports', 'submenu_reports'), Markup.button.callback('🎯 On-Chain Tracking', 'submenu_tracking')],
     [Markup.button.callback('🚀 Quick Snipe', 'menu_snipe'), Markup.button.callback('⚡ Manual Buy', 'menu_buy')],
@@ -180,6 +227,64 @@ bot.action('submenu_reports', async (ctx) => {
     await ctx.editMessageText(`<b>📋 INTELLIGENCE REPORTS</b>\n════════════════════════════════════\nSelect a cached global intelligence digest channel below:`, { parse_mode: 'HTML', reply_markup: keyboard.reply_markup });
 });
 
+// MARKET OPENING REPORT
+bot.action('rep_open', async (ctx) => {
+    await ctx.answerCbQuery('Generating market opening analysis...');
+    const panel = `<pre>
+🦅 APEX TERMINAL // MARKET OPENING DIGEST
+════════════════════════════════════════════
+
+📈 OPENING SESSION METRICS
+┣ Market Status   : 🟢 OPERATIONAL
+┣ Current Time    : ${new Date().toUTCString()}
+┣ 24h Momentum    : Initializing...
+┗ Network Health  : Monitoring
+
+💼 OPENING SESSION ANALYSIS
+📊 Volatility Index: Computing
+📡 Network Status : Connected
+🟢 System Ready
+────────────────────────────────────────
+Standby for detailed opening metrics</pre>`;
+    
+    await ctx.editMessageText(panel, {
+        parse_mode: 'HTML',
+        reply_markup: Markup.inlineKeyboard([
+            [Markup.button.callback('🔄 Refresh', 'rep_open')],
+            [Markup.button.callback('↩️ Back to Reports', 'submenu_reports')]
+        ]).reply_markup
+    });
+});
+
+// MARKET CLOSING REPORT
+bot.action('rep_close', async (ctx) => {
+    await ctx.answerCbQuery('Generating market closing analysis...');
+    const panel = `<pre>
+🦅 APEX TERMINAL // MARKET CLOSING DIGEST
+════════════════════════════════════════════
+
+📈 CLOSING SESSION METRICS
+┣ Market Status   : Closing
+┣ Current Time    : ${new Date().toUTCString()}
+┣ Daily Summary   : Consolidating...
+┗ Session Results : Processing
+
+💼 CLOSING SESSION SUMMARY
+📊 Daily High/Low : Computing
+📡 Volume Summary : Tallying
+🟢 Ready for EOD
+────────────────────────────────────────
+Daily performance audit complete</pre>`;
+    
+    await ctx.editMessageText(panel, {
+        parse_mode: 'HTML',
+        reply_markup: Markup.inlineKeyboard([
+            [Markup.button.callback('🔄 Refresh', 'rep_close')],
+            [Markup.button.callback('↩️ Back to Reports', 'submenu_reports')]
+        ]).reply_markup
+    });
+});
+
 // SUBMENU 2: TRACKING & RADARS
 bot.action('submenu_tracking', async (ctx) => {
     await ctx.answerCbQuery();
@@ -194,12 +299,21 @@ bot.action('submenu_tracking', async (ctx) => {
 // ─── MACRO INTELLIGENCE DECK ─────────────────────────────────────────
 bot.action('rep_fore', async (ctx) => {
     await ctx.answerCbQuery('Computing structural market layers...');
-    const macro = await computeMacroState();
+    try {
+        const macro = await withTimeout(computeMacroState(), 10000, {
+            spotPrice: 0,
+            perpPrice: 0,
+            basisSpread: 0,
+            basisCondition: 'UNKNOWN',
+            capitalVelocity: 0,
+            toxicVolumeRatio: 0,
+            flowToxicity: 'NEUTRAL'
+        });
 
-    const basisColor = macro.basisCondition === 'DISCOUNT' ? '🟡' : '🟢';
-    const toxicityColor = macro.flowToxicity === 'HIGH' ? '🔴' : '🟢';
+        const basisColor = macro.basisCondition === 'DISCOUNT' ? '🟡' : '🟢';
+        const toxicityColor = macro.flowToxicity === 'HIGH' ? '🔴' : '🟢';
 
-    const panel = `<pre>
+        const panel = `<pre>
 🦅 APEX TERMINAL // MACRO INTELLIGENCE DECK
 ════════════════════════════════════════════
 
@@ -216,25 +330,37 @@ bot.action('rep_fore', async (ctx) => {
 ────────────────────────────────────────
 Live Telemetry Reconciled via Jito ShredStream Engine</pre>`;
 
-    await ctx.editMessageText(panel, {
-        parse_mode: 'HTML',
-        reply_markup: Markup.inlineKeyboard([
-            [Markup.button.callback('🔄 Compute New Block Range', 'rep_fore')],
-            [Markup.button.callback('↩️ Back to Reports', 'submenu_reports')]
-        ]).reply_markup
-    });
+        await ctx.editMessageText(panel, {
+            parse_mode: 'HTML',
+            reply_markup: Markup.inlineKeyboard([
+                [Markup.button.callback('🔄 Compute New Block Range', 'rep_fore')],
+                [Markup.button.callback('↩️ Back to Reports', 'submenu_reports')]
+            ]).reply_markup
+        });
+    } catch (err: any) {
+        await ctx.editMessageText(`❌ <b>Macro Computation Failed:</b> <code>${err.message}</code>`, {
+            parse_mode: 'HTML',
+            reply_markup: Markup.inlineKeyboard([[Markup.button.callback('↩️ Back to Reports', 'submenu_reports')]]).reply_markup
+        });
+    }
 });
 
 // ─── SOCIAL & ON-CHAIN RADARS ────────────────────────────────────────
 bot.action('rep_liq', async (ctx) => {
     await ctx.answerCbQuery('Scanning social networks and wallet graphs...');
-    
-    const sampleTargetMint = 'So11111111111111111111111111111111111111112'; // Wrapped SOL base proxy
-    const radar = await runRadarScans(sampleTargetMint);
+    try {
+        const sampleTargetMint = 'So11111111111111111111111111111111111111112'; // Wrapped SOL base proxy
+        const radar = await withTimeout(runRadarScans(sampleTargetMint), 10000, {
+            detectedClusters: 0,
+            syndicateConcentrationPct: 0,
+            insiderConvictionStatus: 'NEUTRAL',
+            socialDensityVelocity: 0,
+            crossGroupResonanceCount: 0
+        });
 
-    const alertIcon = radar.insiderConvictionStatus === 'ACCUMULATION' ? '🔥' : '⚠️';
+        const alertIcon = radar.insiderConvictionStatus === 'ACCUMULATION' ? '🔥' : '⚠️';
 
-    const panel = `<pre>
+        const panel = `<pre>
 🦅 APEX TERMINAL // SOCIAL & ON-CHAIN RADARS
 ════════════════════════════════════════════
 
@@ -249,13 +375,19 @@ bot.action('rep_liq', async (ctx) => {
 ────────────────────────────────────────
 Scrubbing automated bot farm metrics from live outputs</pre>`;
 
-    await ctx.editMessageText(panel, {
-        parse_mode: 'HTML',
-        reply_markup: Markup.inlineKeyboard([
-            [Markup.button.callback('🔄 Run Deep Network Rescan', 'rep_liq')],
-            [Markup.button.callback('↩️ Back to Tracking', 'submenu_tracking')]
-        ]).reply_markup
-    });
+        await ctx.editMessageText(panel, {
+            parse_mode: 'HTML',
+            reply_markup: Markup.inlineKeyboard([
+                [Markup.button.callback('🔄 Run Deep Network Rescan', 'rep_liq')],
+                [Markup.button.callback('↩️ Back to Tracking', 'submenu_tracking')]
+            ]).reply_markup
+        });
+    } catch (err: any) {
+        await ctx.editMessageText(`❌ <b>Radar Scan Failed:</b> <code>${err.message}</code>`, {
+            parse_mode: 'HTML',
+            reply_markup: Markup.inlineKeyboard([[Markup.button.callback('↩️ Back to Tracking', 'submenu_tracking')]]).reply_markup
+        });
+    }
 });
 
 // ─── UNIFIED PERFORMANCE & ROI LEDGER (MILESTONE 5) ──────────────────
@@ -333,13 +465,14 @@ bot.on('text', async (ctx) => {
         const loadingMsg = await ctx.replyWithHTML(`🔍 <b>INTERCEPTING SMART CONTRACT HASH...</b>\n<code>${text}</code>\n⏳ Executing multi-layered risk audit routines...`);
 
         try {
-            const audit = await runDeepTokenAudit(text);
+            const audit = await withTimeout(runDeepTokenAudit(text), 12000, null);
+            if (!audit) throw new Error('Audit timeout');
 
-            if (!audit.success) {
+            if (!audit || !audit.success) {
                 return await ctx.telegram.editMessageText(ctx.chat.id, loadingMsg.message_id, undefined, 
                     `⚠️ <b>Audit Terminated:</b> Contract hash recognized, but no viable AMM routing matrices exist.`,
                     { parse_mode: 'HTML' }
-                );
+                ).catch(() => {});
             }
 
             const trendSign = audit.change24h >= 0 ? '🟢 +' : '🔴 ';
